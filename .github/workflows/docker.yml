@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
-    branches: [master, dev]
+    branches: [master, dev, hermes]
   workflow_run:
     workflows: ["Sync with upstream"]
     types: [completed]
-    branches: [master, dev]
+    branches: [master, dev, hermes]
 
 env:
   DOTNET_VERSION: "9.0.x"
