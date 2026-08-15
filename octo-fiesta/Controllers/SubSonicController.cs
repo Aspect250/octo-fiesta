@@ -139,7 +139,7 @@ public partial class SubsonicController : ControllerBase
         // Fork: the mappings snapshot (in-memory after first load) lets the merge drop
         // external songs already downloaded. Kept on this one line so upstream edits
         // to the block above merge cleanly.
-        return MergeSearchResults(subsonicResult, externalResult, playlistResult, await GetSearchMappingsAsync(), format);
+        return MergeSearchResults(subsonicResult, externalResult, playlistResult, await GetSearchMappingsAsync(), format, cleanQuery);
     }
 
     /// <summary>
@@ -1386,7 +1386,8 @@ public partial class SubsonicController : ControllerBase
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
         IReadOnlyDictionary<string, LocalSongMapping> mappings,
-        string format)
+        string format,
+        string? query)
     {
         var (localSongs, localAlbums, localArtists) = subsonicResult.Success && subsonicResult.Body != null
             ? _modelMapper.ParseSearchResponse(subsonicResult.Body, subsonicResult.ContentType)
@@ -1400,7 +1401,8 @@ public partial class SubsonicController : ControllerBase
             externalResult,
             playlistResult,
             mappings,
-            isJson);
+            isJson,
+            query);
 
         if (isJson)
         {
