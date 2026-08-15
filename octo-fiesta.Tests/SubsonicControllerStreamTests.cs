@@ -125,7 +125,7 @@ public class SubsonicControllerStreamTests
     }
 
     [Fact]
-    public async Task Stream_WithExternalSong_UsesLinkedCancelableTokenForDownload()
+    public async Task Stream_WithExternalSong_ClientDisconnectDoesNotCancelDownload()
     {
         var localLibraryServiceMock = new Mock<ILocalLibraryService>();
         localLibraryServiceMock
@@ -134,9 +134,15 @@ public class SubsonicControllerStreamTests
 
         var downloadServiceMock = new Mock<IDownloadService>();
         CancellationToken capturedToken = default;
+        var requestAbortedCts = new CancellationTokenSource();
         downloadServiceMock
             .Setup(x => x.DownloadAndStreamAsync("deezer", "123", It.IsAny<CancellationToken>()))
-            .Callback<string, string, CancellationToken>((_, _, token) => capturedToken = token)
+            .Callback<string, string, CancellationToken>((_, _, token) =>
+            {
+                capturedToken = token;
+                // Simulate the client disconnecting while the download is in flight.
+                requestAbortedCts.Cancel();
+            })
             .ReturnsAsync(((Stream)new MemoryStream([1, 2, 3]), "song.mp3"));
 
         var appStoppingCts = new CancellationTokenSource();
@@ -147,11 +153,14 @@ public class SubsonicControllerStreamTests
             localLibraryServiceMock,
             downloadServiceMock,
             hostLifetimeMock.Object,
-            CancellationToken.None);
+            requestAbortedCts.Token);
 
         var result = await controller.Stream();
 
         Assert.IsType<FileStreamResult>(result);
+        // The download must NOT observe the client disconnect...
+        Assert.False(capturedToken.IsCancellationRequested);
+        // ...but application shutdown can still cancel it.
         Assert.True(capturedToken.CanBeCanceled);
     }
 
