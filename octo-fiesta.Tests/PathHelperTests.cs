@@ -167,7 +167,7 @@ public class PathHelperTests : IDisposable
     }
 
     [Fact]
-    public void BuildTrackPath_NullDiscNumber_ReplacesWithUnknown()
+    public void BuildTrackPath_NullDiscNumber_DefaultsToOne()
     {
         var song = new Song
         {
@@ -181,7 +181,7 @@ public class PathHelperTests : IDisposable
         var result = PathHelper.BuildTrackPath("/downloads", song, ".flac",
             "{artist}/{album}/Disc {disc}/{track} - {title}", null);
 
-        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}Disc Unknown{Sep}01 - Song.flac", result);
+        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}Disc 1{Sep}01 - Song.flac", result);
     }
 
     [Fact]

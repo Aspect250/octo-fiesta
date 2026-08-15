@@ -88,8 +88,9 @@ public static class PathHelper
         var trackValue = song.Track.HasValue ? $"{song.Track.Value:D2}" : "";
         result = result.Replace("{track}", trackValue);
 
-        // {disc} — disc number, "Unknown" if null
-        var discValue = song.DiscNumber.HasValue ? song.DiscNumber.Value.ToString() : "Unknown";
+        // {disc} — disc number, "1" if null (a missing disc marker must never render
+        // as an "Unknown/" folder segment; single-disc releases default to disc 1)
+        var discValue = song.DiscNumber.HasValue ? song.DiscNumber.Value.ToString() : "1";
         result = result.Replace("{disc}", discValue);
 
         // {year} — year, "Unknown" if null
