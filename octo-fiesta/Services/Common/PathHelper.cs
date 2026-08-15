@@ -57,6 +57,16 @@ public static class PathHelper
         for (var i = 0; i < segments.Length; i++)
         {
             var segment = ReplacePlaceholders(segments[i], song, artistForPath, downloadedQuality);
+
+            // Skip empty path segments: a standalone {disc} segment renders empty on
+            // single-disc releases and must collapse (e.g. "{album}/{disc}/{track}" → "{album}/{track}").
+            // The final segment is the file name — if IT renders empty, keep existing behavior
+            // (SanitizeFileName yields "Unknown") rather than dropping the file part.
+            if (string.IsNullOrWhiteSpace(segment) && i < segments.Length - 1)
+            {
+                continue;
+            }
+
             var isFileName = i == segments.Length - 1;
 
             if (isFileName)
@@ -88,10 +98,18 @@ public static class PathHelper
         var trackValue = song.Track.HasValue ? $"{song.Track.Value:D2}" : "";
         result = result.Replace("{track}", trackValue);
 
-        // {disc} — disc number, "1" if null (a missing disc marker must never render
-        // as an "Unknown/" folder segment; single-disc releases default to disc 1)
-        var discValue = song.DiscNumber.HasValue ? song.DiscNumber.Value.ToString() : "1";
+        // {disc} — disc number. Renders EMPTY for single-disc releases (missing or disc 1) so a
+        // standalone {disc} path segment collapses away (BuildTrackPath skips empty segments);
+        // multi-disc releases keep their disc folder. Never renders "Unknown" or a literal "1".
+        var discValue = song.DiscNumber.HasValue && song.DiscNumber.Value > 1
+            ? song.DiscNumber.Value.ToString()
+            : string.Empty;
         result = result.Replace("{disc}", discValue);
+        if (discValue.Length == 0)
+        {
+            // "{disc} - {track}" with an empty disc → " - 01" → drop the leftover separator
+            result = result.TrimStart(' ', '-').TrimStart().TrimEnd();
+        }
 
         // {year} — year, "Unknown" if null
         var yearValue = song.Year.HasValue ? song.Year.Value.ToString() : "Unknown";
