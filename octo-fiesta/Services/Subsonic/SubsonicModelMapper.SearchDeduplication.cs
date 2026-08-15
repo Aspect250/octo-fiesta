@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using octo_fiesta.Models.Domain;
 using octo_fiesta.Models.Search;
@@ -17,15 +18,16 @@ public partial class SubsonicModelMapper
         SearchResult externalResult,
         List<ExternalPlaylist> externalPlaylists,
         IReadOnlyDictionary<string, LocalSongMapping>? mappings,
-        bool isJson)
+        bool isJson,
+        string? query = null)
     {
         if (isJson)
         {
-            return MergeSearchResultsJsonWithMappings(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, mappings);
+            return MergeSearchResultsJsonWithMappings(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, mappings, query);
         }
         else
         {
-            return MergeSearchResultsXmlWithMappings(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, mappings);
+            return MergeSearchResultsXmlWithMappings(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, mappings, query);
         }
     }
 
@@ -35,7 +37,8 @@ public partial class SubsonicModelMapper
         List<object> localArtists,
         SearchResult externalResult,
         List<ExternalPlaylist> externalPlaylists,
-        IReadOnlyDictionary<string, LocalSongMapping>? mappings)
+        IReadOnlyDictionary<string, LocalSongMapping>? mappings,
+        string? query)
     {
         // Build local indexes from the JSON dictionaries returned by Navidrome's search3.
         var localSongIds = new HashSet<string>(StringComparer.Ordinal);
@@ -81,15 +84,21 @@ public partial class SubsonicModelMapper
         var mergedSongs = new List<object>(localSongs);
         foreach (var song in externalResult.Songs)
         {
-            if (ShouldDropExternalSong(song, mappings, localSongIds, localSongKeys))
+            if (ShouldDropExternalSong(song, mappings, localSongIds, localSongKeys)
+                || ShouldDropExternalSongByContentPolicy(song, query))
             {
                 continue;
             }
             mergedSongs.Add(_responseBuilder.ConvertSongToJson(song));
         }
 
+        // Content-policy pre-pass over external albums: drop Deezer compilations,
+        // then prefer plain-titled albums over (Deluxe/Anniversary/...) editions.
+        var externalAlbums = ApplyPlainAlbumPreference(
+            externalResult.Albums.Where(album => !IsExternalCompilationAlbum(album)));
+
         var mergedAlbums = new List<object>(localAlbums);
-        foreach (var album in externalResult.Albums)
+        foreach (var album in externalAlbums)
         {
             if (ShouldDropExternalAlbum(album, localAlbumKeys))
             {
@@ -132,7 +141,8 @@ public partial class SubsonicModelMapper
         List<object> localArtists,
         SearchResult externalResult,
         List<ExternalPlaylist> externalPlaylists,
-        IReadOnlyDictionary<string, LocalSongMapping>? mappings)
+        IReadOnlyDictionary<string, LocalSongMapping>? mappings,
+        string? query)
     {
         var ns = XNamespace.Get("http://subsonic.org/restapi");
 
@@ -194,7 +204,10 @@ public partial class SubsonicModelMapper
             album.Name = ns + "album";
             mergedAlbums.Add(album);
         }
-        foreach (var album in externalResult.Albums)
+        // Content-policy pre-pass over external albums: drop Deezer compilations,
+        // then prefer plain-titled albums over (Deluxe/Anniversary/...) editions.
+        foreach (var album in ApplyPlainAlbumPreference(
+                     externalResult.Albums.Where(a => !IsExternalCompilationAlbum(a))))
         {
             if (ShouldDropExternalAlbum(album, localAlbumKeys))
             {
@@ -216,7 +229,8 @@ public partial class SubsonicModelMapper
         }
         foreach (var song in externalResult.Songs)
         {
-            if (ShouldDropExternalSong(song, mappings, localSongIds, localSongKeys))
+            if (ShouldDropExternalSong(song, mappings, localSongIds, localSongKeys)
+                || ShouldDropExternalSongByContentPolicy(song, query))
             {
                 continue;
             }
@@ -264,6 +278,171 @@ public partial class SubsonicModelMapper
     {
         var key = BuildAlbumKey(album.Artist, album.Title);
         return key != null && localAlbumKeys.Contains(key);
+    }
+
+    /// <summary>
+    /// Terms that mark a track as a live/remix/alternate version the user does not
+    /// want auto-pulled into the library. Word-boundary aware so "Alive" or
+    /// "remixed" are not false positives, while "(Live)" / "(Demo)" are.
+    /// </summary>
+    private static readonly Regex ExternalSongFilterRegex = new(
+        @"\b(live|remix|mashup|acoustic|unplugged|demo|radio edit|club mix|extended|session|jam in the van)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Drops external songs whose title or album carries a live/remix/alternate-version
+    /// marker, UNLESS the search query itself contains the matched term — an explicit
+    /// search for "Hotel California (Live)" must still return live results. Local
+    /// songs are never filtered by this policy (the caller only applies it to
+    /// external songs).
+    /// </summary>
+    private static bool ShouldDropExternalSongByContentPolicy(Song song, string? query)
+    {
+        if (string.IsNullOrWhiteSpace(song.Title) && string.IsNullOrWhiteSpace(song.Album))
+        {
+            return false;
+        }
+
+        var haystack = song.Title + "\n" + song.Album;
+        var matches = ExternalSongFilterRegex.Matches(haystack);
+        if (matches.Count == 0)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            foreach (Match match in matches)
+            {
+                if (query.Contains(match.Value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Matches parenthesized/bracketed qualifier groups, e.g. "(Bonus Edition)",
+    /// "[Remastered 2024]", "(35th Anniversary / Remastered)".
+    /// </summary>
+    private static readonly Regex AlbumQualifierGroupRegex = new(
+        @"[\(\[]([^\)\]]*?(deluxe|anniversary|bonus|remaster(?:ed)?|edition|live)[^\)\]]*?)[\)\]]",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Matches a trailing dash-separated qualifier phrase, e.g. " - Deluxe Edition",
+    /// " - 35th Anniversary Edition", " - Live at Wembley".
+    /// </summary>
+    private static readonly Regex AlbumTrailingQualifierRegex = new(
+        @"\s-\s+[^-]*(deluxe|anniversary|bonus|remaster(?:ed)?|edition|live)[^-]*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Strips edition/live qualifiers from an album title to recover its base title:
+    /// "Dr. Feelgood (35th Anniversary / Remastered 2024)" -> "Dr. Feelgood".
+    /// </summary>
+    private static string StripAlbumQualifiers(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return title ?? string.Empty;
+        }
+
+        var result = title;
+
+        // Repeated passes handle stacked groups like "(Deluxe) [Bonus Tracks]".
+        bool changed;
+        do
+        {
+            changed = false;
+            result = AlbumQualifierGroupRegex.Replace(result, _ =>
+            {
+                changed = true;
+                return " ";
+            });
+            result = result.Trim();
+        } while (changed);
+
+        // Trailing dash-separated phrases: "Some Album - Deluxe Edition" -> "Some Album".
+        var dashMatch = AlbumTrailingQualifierRegex.Match(result);
+        if (dashMatch.Success)
+        {
+            result = result[..dashMatch.Index].TrimEnd();
+        }
+
+        return result.Trim();
+    }
+
+    /// <summary>
+    /// True when the title carries no edition/live qualifier at all.
+    /// </summary>
+    private static bool IsPlainAlbumTitle(string? title)
+    {
+        return string.Equals(
+            StripAlbumQualifiers(title).Trim(),
+            title?.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? BuildAlbumBaseKey(string? artist, string? title)
+    {
+        var artistKey = StringNormalizer.CreateComparisonKey(artist);
+        var baseTitleKey = StringNormalizer.CreateComparisonKey(StripAlbumQualifiers(title));
+        if (artistKey.Length == 0 || baseTitleKey.Length == 0)
+        {
+            return null;
+        }
+        return artistKey + "\u0001" + baseTitleKey;
+    }
+
+    /// <summary>
+    /// Among external albums sharing the same (artist, base title), drops the
+    /// qualified editions whenever a plain-titled original is present in the same
+    /// result set. Groups with no plain original keep all their editions.
+    /// </summary>
+    private static List<Album> ApplyPlainAlbumPreference(IEnumerable<Album> albums)
+    {
+        var albumList = albums.ToList();
+        if (albumList.Count < 2)
+        {
+            return albumList;
+        }
+
+        var groupsWithPlain = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var album in albumList)
+        {
+            var key = BuildAlbumBaseKey(album.Artist, album.Title);
+            if (key != null && IsPlainAlbumTitle(album.Title))
+            {
+                groupsWithPlain.Add(key);
+            }
+        }
+
+        var result = new List<Album>(albumList.Count);
+        foreach (var album in albumList)
+        {
+            var key = BuildAlbumBaseKey(album.Artist, album.Title);
+            if (key != null && groupsWithPlain.Contains(key) && !IsPlainAlbumTitle(album.Title))
+            {
+                continue;
+            }
+            result.Add(album);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Drops external albums flagged by the provider as compilations (Deezer
+    /// <c>record_type == compilation</c>) — multi-artist "playlists as albums"
+    /// the user does not want.
+    /// </summary>
+    private static bool IsExternalCompilationAlbum(Album album)
+    {
+        return !string.IsNullOrWhiteSpace(album.ReleaseType)
+            && album.ReleaseType.Equals("compilation", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? BuildSongKey(string? artist, string? title)

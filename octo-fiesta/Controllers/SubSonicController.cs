@@ -139,7 +139,7 @@ public class SubsonicController : ControllerBase
         var playlistResult = await playlistTask;
         var mappings = await mappingsTask;
 
-        return MergeSearchResults(subsonicResult, externalResult, playlistResult, mappings, format);
+        return MergeSearchResults(subsonicResult, externalResult, playlistResult, mappings, format, cleanQuery);
     }
 
     /// <summary>
@@ -183,12 +183,12 @@ public class SubsonicController : ControllerBase
         {
             await _externalCoverArtService.MarkAlbumDownloadStartedAsync(provider!, externalId!);
 
-            // Allow cancellation from both client disconnect and application shutdown
-            using var cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(
-                HttpContext.RequestAborted,
-                _hostApplicationLifetime.ApplicationStopping);
-
-            var (downloadStream, filePath) = await _downloadService.DownloadAndStreamAsync(provider!, externalId!, cancellationTokenSource.Token);
+            // Deliberately NOT linked to RequestAborted: the on-demand download must
+            // run to completion even when the client disconnects mid-transfer (mirrors
+            // the background album path), so the file + .lrc land in the library
+            // instead of being deleted as incomplete. Cancellation is app-shutdown only.
+            var (downloadStream, filePath) = await _downloadService.DownloadAndStreamAsync(
+                provider!, externalId!, _hostApplicationLifetime.ApplicationStopping);
             return File(downloadStream, GetContentType(filePath), enableRangeProcessing: true);
         }
         catch (Exception ex)
@@ -807,7 +807,8 @@ public class SubsonicController : ControllerBase
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
         IReadOnlyDictionary<string, LocalSongMapping> mappings,
-        string format)
+        string format,
+        string? query)
     {
         var (localSongs, localAlbums, localArtists) = subsonicResult.Success && subsonicResult.Body != null
             ? _modelMapper.ParseSearchResponse(subsonicResult.Body, subsonicResult.ContentType)
@@ -821,7 +822,8 @@ public class SubsonicController : ControllerBase
             externalResult,
             playlistResult,
             mappings,
-            isJson);
+            isJson,
+            query);
 
         if (isJson)
         {
