@@ -728,8 +728,18 @@ public abstract class BaseDownloadService : IDownloadService
                     });
                 }
 
-                // If download mode is Album and triggering is enabled, start background download of remaining tracks
-                if (triggerAlbumDownload && SubsonicSettings.DownloadMode == DownloadMode.Album && !string.IsNullOrEmpty(song.AlbumId))
+                // If download mode is Album and triggering is enabled, start background download of remaining tracks.
+                // Singles/EPs are excluded: their "album" is often a remix pack, and the user wants just the
+                // track (ReleaseType comes from the provider, e.g. Deezer record_type; it is otherwise only
+                // written to file tags — here it drives a download decision).
+                var isSingleOrEp = !string.IsNullOrWhiteSpace(song.ReleaseType)
+                    && (song.ReleaseType.Equals("single", StringComparison.OrdinalIgnoreCase)
+                        || song.ReleaseType.Equals("ep", StringComparison.OrdinalIgnoreCase));
+
+                if (triggerAlbumDownload
+                    && SubsonicSettings.DownloadMode == DownloadMode.Album
+                    && !string.IsNullOrEmpty(song.AlbumId)
+                    && !isSingleOrEp)
                 {
                     var albumExternalId = ExtractExternalIdFromAlbumId(song.AlbumId);
                     if (!string.IsNullOrEmpty(albumExternalId))
