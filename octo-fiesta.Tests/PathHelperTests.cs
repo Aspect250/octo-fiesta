@@ -167,7 +167,7 @@ public class PathHelperTests : IDisposable
     }
 
     [Fact]
-    public void BuildTrackPath_NullDiscNumber_DefaultsToOne()
+    public void BuildTrackPath_NullDiscNumber_CollapsesDiscSegment()
     {
         var song = new Song
         {
@@ -179,9 +179,45 @@ public class PathHelperTests : IDisposable
         };
 
         var result = PathHelper.BuildTrackPath("/downloads", song, ".flac",
-            "{artist}/{album}/Disc {disc}/{track} - {title}", null);
+            "{artist}/{album}/{disc}/{track} - {title}", null);
 
-        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}Disc 1{Sep}01 - Song.flac", result);
+        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}01 - Song.flac", result);
+    }
+
+    [Fact]
+    public void BuildTrackPath_SingleDisc_CollapsesDiscSegment()
+    {
+        var song = new Song
+        {
+            Title = "Song",
+            Artist = "Artist",
+            Album = "Album",
+            Track = 1,
+            DiscNumber = 1
+        };
+
+        var result = PathHelper.BuildTrackPath("/downloads", song, ".flac",
+            "{artist}/{album}/{disc}/{track} - {title}", null);
+
+        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}01 - Song.flac", result);
+    }
+
+    [Fact]
+    public void BuildTrackPath_MultiDisc_KeepsDiscFolder()
+    {
+        var song = new Song
+        {
+            Title = "Song",
+            Artist = "Artist",
+            Album = "Album",
+            Track = 1,
+            DiscNumber = 2
+        };
+
+        var result = PathHelper.BuildTrackPath("/downloads", song, ".flac",
+            "{artist}/{album}/{disc}/{track} - {title}", null);
+
+        Assert.Equal($"/downloads{Sep}Artist{Sep}Album{Sep}2{Sep}01 - Song.flac", result);
     }
 
     [Fact]
