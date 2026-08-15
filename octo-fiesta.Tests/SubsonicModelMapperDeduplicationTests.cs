@@ -614,4 +614,217 @@ public class SubsonicModelMapperDeduplicationTests
 
         Assert.Equal(3, mergedAlbums.Count);
     }
+
+    // ── Content-policy filters (hermes fork) ─────────────────────────────────
+
+    private static SearchResult ResultWithSongs(params Song[] songs) => new()
+    {
+        Songs = songs.ToList(),
+        Albums = new List<Album>(),
+        Artists = new List<Artist>()
+    };
+
+    private static SearchResult ResultWithAlbums(params Album[] albums) => new()
+    {
+        Songs = new List<Song>(),
+        Albums = albums.ToList(),
+        Artists = new List<Artist>()
+    };
+
+    [Fact]
+    public void MergeSearchResults_DropsExternalSong_WithLiveInTitle()
+    {
+        var externalResult = ResultWithSongs(new Song
+        {
+            Title = "Hotel California (Live)",
+            Artist = "Eagles",
+            ExternalProvider = "deezer",
+            ExternalId = "live-1"
+        });
+
+        var (mergedSongs, _, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        Assert.Empty(mergedSongs);
+    }
+
+    [Fact]
+    public void MergeSearchResults_KeepsExternalSong_WhenQueryContainsFilteredTerm()
+    {
+        var externalResult = ResultWithSongs(new Song
+        {
+            Title = "Hotel California (Live)",
+            Artist = "Eagles",
+            ExternalProvider = "deezer",
+            ExternalId = "live-1"
+        });
+
+        var (mergedSongs, _, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true,
+            query: "Hotel California (Live)");
+
+        Assert.Single(mergedSongs);
+    }
+
+    [Fact]
+    public void MergeSearchResults_DropsExternalSong_WhenAlbumCarriesFilteredTerm()
+    {
+        // Album field match: a track whose *album* is a remix EP.
+        var externalResult = ResultWithSongs(new Song
+        {
+            Title = "Midnight City",
+            Album = "Midnight City (Remix EP)",
+            Artist = "M83",
+            ExternalProvider = "deezer",
+            ExternalId = "remix-1"
+        });
+
+        var (mergedSongs, _, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        Assert.Empty(mergedSongs);
+    }
+
+    [Fact]
+    public void MergeSearchResults_KeepsLocalSongs_RegardlessOfTitle()
+    {
+        // Local songs are never filtered by the content policy.
+        var localSongs = new List<object>
+        {
+            new Dictionary<string, object> { ["id"] = "local-1", ["title"] = "Hotel California (Live)", ["artist"] = "Eagles" }
+        };
+        var externalResult = ResultWithSongs();
+
+        var (mergedSongs, _, _) = _mapper.MergeSearchResults(
+            localSongs, new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        Assert.Single(mergedSongs);
+    }
+
+    [Fact]
+    public void MergeSearchResults_KeepsExternalSong_WhenTermIsPartOfAnotherWord()
+    {
+        // Word-boundary awareness: "Alive" must not match "live".
+        var externalResult = ResultWithSongs(new Song
+        {
+            Title = "Alive",
+            Artist = "Pearl Jam",
+            ExternalProvider = "deezer",
+            ExternalId = "alive-1"
+        });
+
+        var (mergedSongs, _, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        Assert.Single(mergedSongs);
+    }
+
+    [Fact]
+    public void MergeSearchResults_PrefersPlainAlbum_OverAnniversaryEdition()
+    {
+        var externalResult = ResultWithAlbums(
+            new Album
+            {
+                Id = "ext-plain",
+                Title = "Dr. Feelgood",
+                Artist = "Mötley Crüe",
+                ExternalProvider = "deezer",
+                ExternalId = "plain-1",
+                ReleaseType = "album"
+            },
+            new Album
+            {
+                Id = "ext-anniv",
+                Title = "Dr. Feelgood (35th Anniversary / Remastered 2024)",
+                Artist = "Mötley Crüe",
+                ExternalProvider = "deezer",
+                ExternalId = "anniv-1",
+                ReleaseType = "album"
+            });
+
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        var album = Assert.Single(mergedAlbums);
+        Assert.Equal("ext-plain", ((Dictionary<string, object>)album)["id"]);
+    }
+
+    [Fact]
+    public void MergeSearchResults_KeepsQualifiedAlbums_WhenNoPlainOriginalExists()
+    {
+        // No plain "Hybrid Theory" in this result set -> editions stay visible.
+        var externalResult = ResultWithAlbums(
+            new Album { Id = "ext-bonus", Title = "Hybrid Theory (Bonus Edition)", Artist = "Linkin Park", ReleaseType = "album" },
+            new Album { Id = "ext-deluxe", Title = "Hybrid Theory (Deluxe)", Artist = "Linkin Park", ReleaseType = "album" });
+
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        Assert.Equal(2, mergedAlbums.Count);
+    }
+
+    [Fact]
+    public void MergeSearchResults_PrefersPlainAlbum_OverTrailingDashEdition()
+    {
+        var externalResult = ResultWithAlbums(
+            new Album { Id = "ext-plain", Title = "Some Album", Artist = "Some Artist", ReleaseType = "album" },
+            new Album { Id = "ext-dash", Title = "Some Album - Deluxe Edition", Artist = "Some Artist", ReleaseType = "album" });
+
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        var album = Assert.Single(mergedAlbums);
+        Assert.Equal("ext-plain", ((Dictionary<string, object>)album)["id"]);
+    }
+
+    [Fact]
+    public void MergeSearchResults_DropsCompilationAlbum()
+    {
+        var externalResult = ResultWithAlbums(
+            new Album
+            {
+                Id = "ext-comp",
+                Title = "Now That's What I Call Music 42",
+                Artist = "Various Artists",
+                ReleaseType = "compilation"
+            },
+            new Album
+            {
+                Id = "ext-studio",
+                Title = "Pocket Full of Kryptonite",
+                Artist = "Spin Doctors",
+                ReleaseType = "album"
+            });
+
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, true);
+
+        var album = Assert.Single(mergedAlbums);
+        Assert.Equal("ext-studio", ((Dictionary<string, object>)album)["id"]);
+    }
+
+    [Fact]
+    public void MergeSearchResults_DropsCompilationAlbum_XmlPath()
+    {
+        var externalResult = ResultWithAlbums(
+            new Album { Id = "ext-comp", Title = "Greatest Hits", Artist = "Various", ReleaseType = "compilation" },
+            new Album { Id = "ext-studio", Title = "A Kind of Magic", Artist = "Queen", ReleaseType = "album" });
+
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), new List<object>(), new List<object>(),
+            externalResult, new List<ExternalPlaylist>(), null, false);
+
+        Assert.Single(mergedAlbums);
+        var element = Assert.IsType<System.Xml.Linq.XElement>(mergedAlbums[0]);
+        Assert.Equal("ext-studio", element.Attribute("id")?.Value);
+    }
 }
