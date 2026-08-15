@@ -30,12 +30,14 @@ public class BaseDownloadServiceDedupeTests : IDisposable
     private FakeDedupeDownloadService BuildService(
         Mock<ILocalLibraryService> localLibMock,
         Mock<IMusicMetadataService> metaMock,
-        string? folderTemplate = null)
+        string? folderTemplate = null,
+        DownloadMode? downloadMode = null)
     {
         var settings = new SubsonicSettings
         {
             FolderTemplate = folderTemplate ?? "{artist}/{album}/{track}. {title}",
-            StorageMode = StorageMode.Permanent
+            StorageMode = StorageMode.Permanent,
+            DownloadMode = downloadMode ?? DownloadMode.Track
         };
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -270,9 +272,108 @@ public class BaseDownloadServiceDedupeTests : IDisposable
             () => service.DownloadSongAsync("fake", "3"));
     }
 
+    [Fact]
+    public async Task DownloadSongAsync_SingleRelease_DoesNotTriggerAlbumDownload()
+    {
+        // A single/EP download must stay track-only even in Album mode: the album
+        // trigger excludes ReleaseType single/ep (hermes fork).
+        var localLibMock = new Mock<ILocalLibraryService>();
+        localLibMock.Setup(x => x.GetMappingForExternalSongAsync("fake", "2")).ReturnsAsync((LocalSongMapping?)null);
+        localLibMock.Setup(x => x.GetLocalPathForExternalSongAsync("fake", "2")).ReturnsAsync((string?)null);
+        localLibMock.Setup(x => x.FindLocalSongByMetadataAsync(It.IsAny<Song>())).ReturnsAsync((LocalSongMatch?)null);
+
+        var metaMock = new Mock<IMusicMetadataService>();
+        metaMock.Setup(x => x.GetSongAsync("fake", "2")).ReturnsAsync(new Song
+        {
+            ExternalId = "2",
+            ExternalProvider = "fake",
+            Title = "Single Track",
+            Artist = "Artist",
+            Album = "Single",
+            AlbumId = "ext-album-1",
+            ReleaseType = "single",
+            Track = 1
+        });
+        // The single's "album" carries remix-pack extras that must NOT be downloaded.
+        metaMock.Setup(x => x.GetAlbumAsync("fake", "ext-album-1")).ReturnsAsync(new Album
+        {
+            Id = "ext-album-1",
+            Title = "Single",
+            Artist = "Artist",
+            Songs = new List<Song>
+            {
+                new Song { ExternalId = "2", ExternalProvider = "fake", Title = "Single Track", AlbumId = "ext-album-1", ReleaseType = "single" },
+                new Song { ExternalId = "3", ExternalProvider = "fake", Title = "Club Mix", AlbumId = "ext-album-1", ReleaseType = "single" },
+                new Song { ExternalId = "4", ExternalProvider = "fake", Title = "Extended Mix", AlbumId = "ext-album-1", ReleaseType = "single" }
+            }
+        });
+        metaMock.Setup(x => x.GetSongAsync("fake", "3")).ReturnsAsync(new Song { ExternalId = "3", ExternalProvider = "fake", Title = "Club Mix", AlbumId = "ext-album-1", ReleaseType = "single" });
+        metaMock.Setup(x => x.GetSongAsync("fake", "4")).ReturnsAsync(new Song { ExternalId = "4", ExternalProvider = "fake", Title = "Extended Mix", AlbumId = "ext-album-1", ReleaseType = "single" });
+
+        var service = BuildService(localLibMock, metaMock, downloadMode: DownloadMode.Album);
+
+        var result = await service.DownloadSongAsync("fake", "2");
+
+        Assert.NotNull(result);
+        // Give a wrongly-fired background album download ample time to run.
+        await Task.Delay(1500);
+        Assert.Equal(1, service.DownloadTrackCount);
+    }
+
+    [Fact]
+    public async Task DownloadSongAsync_RealAlbum_TriggersAlbumDownload()
+    {
+        // Real albums still trigger the background whole-album download in Album mode.
+        var localLibMock = new Mock<ILocalLibraryService>();
+        localLibMock.Setup(x => x.GetMappingForExternalSongAsync("fake", "2")).ReturnsAsync((LocalSongMapping?)null);
+        localLibMock.Setup(x => x.GetLocalPathForExternalSongAsync("fake", "2")).ReturnsAsync((string?)null);
+        localLibMock.Setup(x => x.FindLocalSongByMetadataAsync(It.IsAny<Song>())).ReturnsAsync((LocalSongMatch?)null);
+
+        var metaMock = new Mock<IMusicMetadataService>();
+        metaMock.Setup(x => x.GetSongAsync("fake", "2")).ReturnsAsync(new Song
+        {
+            ExternalId = "2",
+            ExternalProvider = "fake",
+            Title = "Track One",
+            Artist = "Artist",
+            Album = "Album",
+            AlbumId = "ext-album-2",
+            ReleaseType = "album",
+            Track = 1
+        });
+        metaMock.Setup(x => x.GetAlbumAsync("fake", "ext-album-2")).ReturnsAsync(new Album
+        {
+            Id = "ext-album-2",
+            Title = "Album",
+            Artist = "Artist",
+            Songs = new List<Song>
+            {
+                new Song { ExternalId = "2", ExternalProvider = "fake", Title = "Track One", AlbumId = "ext-album-2", ReleaseType = "album" },
+                new Song { ExternalId = "3", ExternalProvider = "fake", Title = "Track Two", AlbumId = "ext-album-2", ReleaseType = "album" },
+                new Song { ExternalId = "4", ExternalProvider = "fake", Title = "Track Three", AlbumId = "ext-album-2", ReleaseType = "album" }
+            }
+        });
+        metaMock.Setup(x => x.GetSongAsync("fake", "3")).ReturnsAsync(new Song { ExternalId = "3", ExternalProvider = "fake", Title = "Track Two", AlbumId = "ext-album-2", ReleaseType = "album" });
+        metaMock.Setup(x => x.GetSongAsync("fake", "4")).ReturnsAsync(new Song { ExternalId = "4", ExternalProvider = "fake", Title = "Track Three", AlbumId = "ext-album-2", ReleaseType = "album" });
+
+        var service = BuildService(localLibMock, metaMock, downloadMode: DownloadMode.Album);
+
+        var result = await service.DownloadSongAsync("fake", "2");
+
+        Assert.NotNull(result);
+        // Poll for the background album download of the remaining two tracks.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (service.DownloadTrackCount < 3 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100);
+        }
+        Assert.Equal(3, service.DownloadTrackCount);
+    }
+
     private sealed class FakeDedupeDownloadService : BaseDownloadService
     {
         public bool DownloadTrackCalled { get; private set; }
+        public int DownloadTrackCount { get; private set; }
         public bool CreateFileBeforeWrite { get; set; }
 
         protected override string ProviderName => "fake";
@@ -298,6 +399,7 @@ public class BaseDownloadServiceDedupeTests : IDisposable
         protected override Task<DownloadResult> DownloadTrackAsync(string trackId, Song song, CancellationToken cancellationToken)
         {
             DownloadTrackCalled = true;
+            DownloadTrackCount++;
 
             if (CreateFileBeforeWrite)
             {
