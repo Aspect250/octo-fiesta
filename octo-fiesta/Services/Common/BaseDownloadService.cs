@@ -441,6 +441,157 @@ public abstract class BaseDownloadService : IDownloadService
     #region Common Download Logic
 
     /// <summary>
+    /// Album-mode download gate (hermes): resolves the album behind a track, applies the content
+    /// policy (<see cref="ReleasePolicy"/>) and — when the resolved release is a single/EP,
+    /// edition, compilation or live/remix/junk release — keeps it track-only or re-resolves to a
+    /// plain studio album. Falls back to skipping the download entirely when no acceptable
+    /// release exists (the track stays unresolved for the next sync cycle).
+    /// </summary>
+    private async Task ResolveAndTriggerAlbumDownloadAsync(
+        string externalProvider, string albumExternalId, string excludeTrackExternalId, Song song)
+    {
+        // Singles/EPs are track-only. Check the song's own ReleaseType first (providers set it
+        // on stream/album-tracklist flows), then the album's record_type (search-resolved songs
+        // often lack ReleaseType — the album is authoritative in that case).
+        if (ReleasePolicy.IsSingleOrEp(song.ReleaseType))
+        {
+            Logger.LogInformation(
+                "Track {TrackId} is on a {ReleaseType} release — track-only download (Album mode applies to real albums only)",
+                excludeTrackExternalId, song.ReleaseType);
+            return;
+        }
+
+        Album? album;
+        try
+        {
+            album = await MetadataService.GetAlbumAsync(externalProvider, albumExternalId);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to fetch album {AlbumId} for the download gate — skipping background album download", albumExternalId);
+            return;
+        }
+
+        if (album == null)
+        {
+            Logger.LogWarning("Album {AlbumId} not found via provider — skipping background album download for track {TrackId}", albumExternalId, excludeTrackExternalId);
+            return;
+        }
+
+        if (ReleasePolicy.IsSingleOrEp(album.ReleaseType))
+        {
+            Logger.LogInformation(
+                "Album {AlbumTitle} is a {ReleaseType} — track-only download (Album mode applies to real albums only)",
+                album.Title, album.ReleaseType);
+            return;
+        }
+
+        var policy = ReleasePolicy.EvaluateAlbumForDownload(album);
+        if (policy == AlbumDownloadPolicy.Accept)
+        {
+            TriggerBackgroundAlbumDownload(externalProvider, albumExternalId, album.Title, excludeTrackExternalId);
+            return;
+        }
+
+        // HardReject (edition/compilation/junk) or DemoteOnly (remastered): try the plain equivalent first.
+        var plain = await FindPlainAlbumAsync(externalProvider, album, song);
+        if (plain != null)
+        {
+            if (string.IsNullOrWhiteSpace(plain.ExternalId))
+            {
+                Logger.LogWarning("Plain album {PlainTitle} for {RejectedTitle} has no external id — skipping download", plain.Title, album.Title);
+                return;
+            }
+            Logger.LogInformation(
+                "Album {RejectedTitle} rejected ({Policy}); re-resolved to plain album {PlainTitle} ({PlainId}) — downloading that instead",
+                album.Title, policy, plain.Title, plain.ExternalId);
+            TriggerBackgroundAlbumDownload(externalProvider, plain.ExternalId, plain.Title, excludeTrackExternalId);
+            return;
+        }
+
+        if (policy == AlbumDownloadPolicy.DemoteOnly)
+        {
+            Logger.LogInformation(
+                "Album {RejectedTitle} has no plain equivalent ({Policy}) — falling back to the remastered release",
+                album.Title, policy);
+            TriggerBackgroundAlbumDownload(externalProvider, albumExternalId, album.Title, excludeTrackExternalId);
+            return;
+        }
+
+        Logger.LogWarning(
+            "Album {RejectedTitle} rejected ({Policy}) and no plain equivalent found — skipping download of track {TrackId}; will retry on the next cycle",
+            album.Title, policy, excludeTrackExternalId);
+    }
+
+    private void TriggerBackgroundAlbumDownload(string externalProvider, string albumExternalId, string albumTitle, string excludeTrackExternalId)
+    {
+        Logger.LogInformation("Download mode is Album, triggering background download for album {AlbumId} ({AlbumTitle})", albumExternalId, albumTitle);
+        DownloadRemainingAlbumTracksInBackground(externalProvider, albumExternalId, excludeTrackExternalId);
+    }
+
+    /// <summary>
+    /// Re-resolves a rejected album to a plain studio album: searches the provider's ALBUM section
+    /// with the qualifier-stripped base title and returns the first candidate that passes the
+    /// download policy, is plain-titled, matches the artist, and (when available) has
+    /// record_type "album". Returns null when no acceptable plain release exists.
+    /// </summary>
+    private async Task<Album?> FindPlainAlbumAsync(string externalProvider, Album rejected, Song song)
+    {
+        var baseTitle = ReleasePolicy.StripAlbumQualifiers(rejected.Title);
+        baseTitle = ReleasePolicy.StripJunkTerms(baseTitle);
+        if (string.IsNullOrWhiteSpace(baseTitle))
+        {
+            baseTitle = $"{song.Artist} {song.Title}".Trim();
+        }
+        if (string.IsNullOrWhiteSpace(baseTitle))
+        {
+            return null;
+        }
+
+        List<Album> candidates;
+        try
+        {
+            candidates = await MetadataService.SearchAlbumsAsync(baseTitle, 20);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Plain-album re-resolution search failed for {Query} — skipping download", baseTitle);
+            return null;
+        }
+
+        // Defensive: providers always return a list, but never crash the gate on null.
+        candidates ??= new List<Album>();
+
+        Logger.LogDebug("Plain-album re-resolution: query '{Query}' returned {Count} candidates for rejected album '{RejectedTitle}'",
+            baseTitle, candidates.Count, rejected.Title);
+
+        Album? fallbackAnyAccept = null;
+        foreach (var candidate in candidates)
+        {
+            if (ReleasePolicy.EvaluateAlbumForDownload(candidate) != AlbumDownloadPolicy.Accept)
+            {
+                continue;
+            }
+            if (!ReleasePolicy.IsPlainAlbumTitle(candidate.Title))
+            {
+                continue;
+            }
+            if (!ReleasePolicy.ArtistMatches(candidate.Artist, rejected.Artist)
+                && !ReleasePolicy.ArtistMatches(candidate.Artist, song.Artist))
+            {
+                continue;
+            }
+            // Prefer record_type == album; keep the first plain candidate as a fallback.
+            if (string.Equals(candidate.ReleaseType, "album", StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+            fallbackAnyAccept ??= candidate;
+        }
+        return fallbackAnyAccept;
+    }
+
+    /// <summary>
     /// Internal method for downloading a song with control over album download triggering
     /// </summary>
     /// <param name="externalProvider">The external provider name</param>
@@ -677,23 +828,18 @@ public abstract class BaseDownloadService : IDownloadService
                 }
 
                 // If download mode is Album and triggering is enabled, start background download of remaining tracks.
-                // Singles/EPs are excluded: their "album" is often a remix pack, and the user wants just the
-                // track (ReleaseType comes from the provider, e.g. Deezer record_type; it is otherwise only
-                // written to file tags — here it drives a download decision).
-                var isSingleOrEp = !string.IsNullOrWhiteSpace(song.ReleaseType)
-                    && (song.ReleaseType.Equals("single", StringComparison.OrdinalIgnoreCase)
-                        || song.ReleaseType.Equals("ep", StringComparison.OrdinalIgnoreCase));
-
+                // The resolved album goes through the content-policy gate: singles/EPs stay track-only (their
+                // "album" is often a remix pack), and editions/compilations/live-junk releases are rejected and
+                // re-resolved to a plain studio album when one exists — otherwise the download is skipped for
+                // this cycle and the track stays unresolved for the next sync.
                 if (triggerAlbumDownload
                     && SubsonicSettings.DownloadMode == DownloadMode.Album
-                    && !string.IsNullOrEmpty(song.AlbumId)
-                    && !isSingleOrEp)
+                    && !string.IsNullOrEmpty(song.AlbumId))
                 {
                     var albumExternalId = ExtractExternalIdFromAlbumId(song.AlbumId);
                     if (!string.IsNullOrEmpty(albumExternalId))
                     {
-                        Logger.LogInformation("Download mode is Album, triggering background download for album {AlbumId}", albumExternalId);
-                        DownloadRemainingAlbumTracksInBackground(externalProvider, albumExternalId, externalId);
+                        await ResolveAndTriggerAlbumDownloadAsync(externalProvider, albumExternalId, externalId, song);
                     }
                 }
             }
