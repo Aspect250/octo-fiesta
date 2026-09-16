@@ -60,11 +60,12 @@ public static class PathHelper
         {
             var segment = ReplacePlaceholders(segments[i], song, artistForPath, downloadedQuality);
 
-            // Skip empty path segments: a standalone {disc} segment renders empty on
+            // Collapse only {disc}-driven empty segments: a standalone {disc} renders empty on
             // single-disc releases and must collapse (e.g. "{album}/{disc}/{track}" → "{album}/{track}").
-            // The final segment is the file name — if IT renders empty, keep existing behavior
-            // (SanitizeFileName yields "Unknown") rather than dropping the file part.
-            if (string.IsNullOrWhiteSpace(segment) && i < segments.Length - 1)
+            // Other empty segments fall through to sanitization, which yields "Unknown" like
+            // upstream — a missing artist/album keeps its folder. The final segment is the file
+            // name — if IT renders empty it stays too (SanitizeFileName yields "Unknown").
+            if (string.IsNullOrWhiteSpace(segment) && i < segments.Length - 1 && segments[i].Contains("{disc}"))
             {
                 continue;
             }
