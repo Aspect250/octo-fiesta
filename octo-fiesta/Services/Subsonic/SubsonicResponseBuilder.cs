@@ -10,7 +10,7 @@ namespace octo_fiesta.Services.Subsonic;
 /// <summary>
 /// Handles building Subsonic API responses in both XML and JSON formats.
 /// </summary>
-public class SubsonicResponseBuilder
+public partial class SubsonicResponseBuilder
 {
     private const string SubsonicNamespace = "http://subsonic.org/restapi";
     private const string SubsonicVersion = "1.16.1";
@@ -684,7 +684,7 @@ public class SubsonicResponseBuilder
         if (song != null)
         {
             var (suffix, _, br) = GetSuffixContentTypeAndBitrate(song);
-            container = suffix == "Remote" ? "mp3" : suffix;
+            container = br > 0 ? suffix : "mp3"; // br == 0: no file yet, the suffix is only the origin label
             bitRate = br > 0 ? br : 128;
         }
 
@@ -713,7 +713,7 @@ public class SubsonicResponseBuilder
     /// Determines the file suffix, MIME content type, and bitrate based on the song's provider and local path.
     /// Supports FLAC, M4A (AAC), and MP3 formats for local files, and provider-specific formats for external files.
     /// </summary>
-    private static (string suffix, string contentType, int bitRate) GetSuffixContentTypeAndBitrate(Song song)
+    private (string suffix, string contentType, int bitRate) GetSuffixContentTypeAndBitrate(Song song)
     {
         // For cached/downloaded files, determine format from file extension
         if (!string.IsNullOrEmpty(song.LocalPath))
@@ -734,8 +734,7 @@ public class SubsonicResponseBuilder
             return ("mp3", "audio/mpeg", 128);
         }
 
-        // Default for external providers (Deezer, Qobuz, SquidWTF) without cached file
-        return ("Remote", "audio/mpeg", 0);
+        return (GetExternalSuffix(song), "audio/mpeg", 0);
     }
 
     private object ConvertJsonValue(JsonElement value)

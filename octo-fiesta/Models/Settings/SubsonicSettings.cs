@@ -91,7 +91,10 @@ public enum MusicService
     /// <summary>
     /// Apple Music through an alacarte instance (see AppleMusicSettings)
     /// </summary>
-    AppleMusic
+    AppleMusic,
+
+    /// <summary>GD Studio aggregator.</summary>
+    GDStudio
 }
 
 public partial class SubsonicSettings

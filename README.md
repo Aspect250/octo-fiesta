@@ -29,6 +29,8 @@ This fork extends the upstream project with the following features and integrati
 - **More robust Subsonic compatibility**: `reportPlayback` accepts both legacy `id` and OpenSubsonic `mediaId` values, external song IDs are resolved to local IDs when possible, and missing lyrics responses are normalised for clients that do not handle Subsonic error 70.
 - **Qobuz application credentials**: `QOBUZ_APP_ID` and `QOBUZ_APP_SECRET` can be supplied to avoid scraping Qobuz's web bundle for these values.
 
+Provider lists, GDStudio, per-provider download folders, optional bitrate replacement, and optional provider labels are documented in [Fork provider features](docs/fork-providers.md). Existing single-provider configurations and automatic alacarte integration continue to work.
+
 The fork also includes automated upstream synchronisation/build workflows, expanded regression coverage, and a `scripts/library_rename_to_qobuz.py` migration helper for existing libraries.
 
 The upstream sync workflow requires a repository secret named `SYNC_TOKEN`. The token needs write access to contents, pull requests, and workflows because sync commits may update files under `.github/workflows/`.

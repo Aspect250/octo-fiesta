@@ -84,7 +84,12 @@ builder.Services.AddHttpClient(LrclibLyricsService.HttpClientName, client =>
 // Register music service based on configuration
 // IMPORTANT: Primary service MUST be registered LAST because ASP.NET Core DI
 // will use the last registered implementation when injecting IMusicMetadataService/IDownloadService
-if (musicService == MusicService.Qobuz)
+var composedProviders = octo_fiesta.Services.Composite.ProviderFeature.TryRegister(builder.Services, builder.Configuration);
+if (composedProviders)
+{
+    // Registered by the optional provider feature.
+}
+else if (musicService == MusicService.Qobuz)
 {
     // If playlists enabled, register Deezer FIRST (secondary provider)
     if (enableExternalPlaylists)
@@ -93,7 +98,7 @@ if (musicService == MusicService.Qobuz)
         builder.Services.AddSingleton<IDownloadService, DeezerDownloadService>();
         builder.Services.AddSingleton<PlaylistSyncService>();
     }
-    
+
     // Qobuz services (primary) - registered LAST to be injected by default
     builder.Services.AddSingleton<QobuzBundleService>();
     builder.Services.AddSingleton<IMusicMetadataService, QobuzMetadataService>();
@@ -109,13 +114,13 @@ else if (musicService == MusicService.SquidWTF)
     {
         builder.Services.AddSingleton<PlaylistSyncService>();
     }
-    
+
     // Instance manager for automatic API failover (required for Tidal)
     builder.Services.AddSingleton<SquidWTFInstanceManager>();
 
     // Captcha ALTCHA solver for SquidWTF Qobuz
     builder.Services.AddSingleton<SquidWTFCaptchaSolver>();
-    
+
     // SquidWTF services (primary) - registered LAST to be injected by default
     builder.Services.AddSingleton<IMusicMetadataService, SquidWTFMetadataService>();
     builder.Services.AddSingleton<IDownloadService, SquidWTFDownloadService>();
@@ -157,14 +162,14 @@ else
         builder.Services.AddSingleton<IDownloadService, QobuzDownloadService>();
         builder.Services.AddSingleton<PlaylistSyncService>();
     }
-    
+
     // Deezer services (primary, default) - registered LAST to be injected by default
     builder.Services.AddSingleton<IMusicMetadataService, DeezerMetadataService>();
     builder.Services.AddSingleton<IDownloadService, DeezerDownloadService>();
 }
 
 // Apple Music through alacarte next to the primary provider, when configured
-if (musicService != MusicService.AppleMusic && AppleMusicRegistration.IsConfigured(builder.Configuration))
+if (!composedProviders && musicService != MusicService.AppleMusic && AppleMusicRegistration.IsConfigured(builder.Configuration))
 {
     AppleMusicRegistration.AddAppleMusicAlongside(builder.Services, enableExternalPlaylists);
 }
