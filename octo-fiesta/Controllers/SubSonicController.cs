@@ -618,6 +618,49 @@ public partial class SubsonicController : ControllerBase
         return HasEditionSuffix(candidateKey, albumKey) || HasEditionSuffix(albumKey, candidateKey);
     }
 
+    /// <summary>
+    /// The library album holding a downloaded track of this provider album, or null. Only our
+    /// own mappings are read, and the library album must carry the provider album's title,
+    /// so a track shared with another release does not pull in that release's album.
+    /// </summary>
+    private async Task<string?> FindOwnedAlbumIdAsync(Album album, Dictionary<string, string> parameters)
+    {
+        var mapped = new List<string>();
+        foreach (var song in album.Songs.Where(s => s.ExternalProvider != null && s.ExternalId != null))
+        {
+            var mapping = await _localLibraryService.GetMappingForExternalSongAsync(song.ExternalProvider!, song.ExternalId!);
+            if (!string.IsNullOrEmpty(mapping?.LocalSubsonicId))
+            {
+                mapped.Add(mapping.LocalSubsonicId);
+            }
+        }
+
+        var albumKey = StringNormalizer.CreateComparisonKey(album.Title);
+        foreach (var localSongId in mapped.Take(3))
+        {
+            var lookup = new Dictionary<string, string>(parameters) { ["id"] = localSongId, ["f"] = "json" };
+            var result = await _proxyService.RelaySafeAsync("rest/getSong", lookup);
+            if (!result.Success || result.Body == null)
+            {
+                continue;
+            }
+
+            using var doc = JsonDocument.Parse(result.Body);
+            if (doc.RootElement.TryGetProperty("subsonic-response", out var response)
+                && response.TryGetProperty("song", out var song)
+                && song.TryGetProperty("albumId", out var albumId)
+                && song.TryGetProperty("album", out var albumName)
+                && !string.IsNullOrEmpty(albumId.GetString())
+                && (StringNormalizer.CreateComparisonKey(albumName.GetString()) == albumKey
+                    || IsSameAlbumWithEditionSuffix(albumName.GetString(), album.Title)))
+            {
+                return albumId.GetString();
+            }
+        }
+
+        return null;
+    }
+
     // How long an album page waits for a provider the first time it is asked about; after
     // that the answer is cached and the page never waits.
     private static readonly TimeSpan FirstLookupBudget = TimeSpan.FromSeconds(2);
@@ -923,7 +966,15 @@ public partial class SubsonicController : ControllerBase
                 return _responseBuilder.CreateError(format, 70, "Album not found");
             }
 
-            return _responseBuilder.CreateAlbumResponse(format, album);
+            // An album the library holds by now is served as the library's own, so a page
+            // opened while it was remote shows what is owned instead of staying remote.
+            var ownedAlbumId = await FindOwnedAlbumIdAsync(album, parameters);
+            if (ownedAlbumId == null)
+            {
+                return _responseBuilder.CreateAlbumResponse(format, album);
+            }
+
+            parameters["id"] = ownedAlbumId;
         }
 
         var navidromeResult = await _proxyService.RelaySafeAsync("rest/getAlbum", parameters);

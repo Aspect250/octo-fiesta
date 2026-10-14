@@ -75,7 +75,10 @@ public class SubsonicControllerGetAlbumTests
         Mock<IMusicMetadataService> metadataServiceMock,
         bool asXml,
         string? navidromeJson = null,
-        ExternalAlbumMergeCache? mergeCache = null)
+        ExternalAlbumMergeCache? mergeCache = null,
+        string albumId = "local-album-1",
+        string? songJson = null,
+        Action<Mock<ILocalLibraryService>>? configureLibrary = null)
     {
         var responseBuilder = new SubsonicResponseBuilder();
         var settings = Options.Create(new SubsonicSettings { Url = "http://localhost:4533" });
@@ -87,10 +90,12 @@ public class SubsonicControllerGetAlbumTests
                 "SendAsync",
                 ItExpr.IsAny<HttpRequestMessage>(),
                 ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(() => new HttpResponseMessage(HttpStatusCode.OK)
+            .ReturnsAsync((HttpRequestMessage request, CancellationToken _) => new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(
-                    asXml ? NavidromeAlbumXml : navidromeJson ?? NavidromeAlbumJson,
+                    songJson != null && request.RequestUri!.AbsolutePath.Contains("getSong")
+                        ? songJson
+                        : asXml ? NavidromeAlbumXml : navidromeJson ?? NavidromeAlbumJson,
                     System.Text.Encoding.UTF8,
                     asXml ? "application/xml" : "application/json")
             });
@@ -108,6 +113,7 @@ public class SubsonicControllerGetAlbumTests
         localLibraryServiceMock
             .Setup(x => x.ParseExternalId(It.IsAny<string>()))
             .Returns((false, null, null, null));
+        configureLibrary?.Invoke(localLibraryServiceMock);
 
         var controller = new SubsonicController(
             settings,
@@ -124,8 +130,8 @@ public class SubsonicControllerGetAlbumTests
 
         var httpContext = new DefaultHttpContext();
         httpContext.Request.QueryString = asXml
-            ? new QueryString("?id=local-album-1")
-            : new QueryString("?id=local-album-1&f=json");
+            ? new QueryString($"?id={albumId}")
+            : new QueryString($"?id={albumId}&f=json");
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
 
         return controller;
@@ -467,5 +473,77 @@ public class SubsonicControllerGetAlbumTests
 
         Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(1));
         provider.Verify(x => x.SearchAlbumsAsync("Air Moon Safari", It.IsAny<int>()), Times.Once);
+    }
+
+    private static Mock<IMusicMetadataService> RemoteKammthaarProvider()
+    {
+        var provider = CreateMetadataService();
+        provider.Setup(x => x.GetAlbumAsync("deezer", "7")).ReturnsAsync(new Album
+        {
+            Id = "ext-deezer-album-7",
+            Title = "Kammthaar",
+            Artist = "Ultra Vomit",
+            Songs = new List<Song>
+            {
+                new Song { Title = "Kammthaar", Track = 1, DiscNumber = 1, Duration = 154, ExternalProvider = "deezer", ExternalId = "6" },
+                new Song { Title = "Kammthaar (Live)", Track = 2, DiscNumber = 1, Duration = 200, ExternalProvider = "deezer", ExternalId = "8" }
+            }
+        });
+        return provider;
+    }
+
+    private static Action<Mock<ILocalLibraryService>> RemoteAlbumLibrary(string? mappedLocalId) => library =>
+    {
+        library.Setup(x => x.ParseExternalId("ext-deezer-album-7")).Returns((true, "deezer", "album", "7"));
+        library.Setup(x => x.GetMappingForExternalSongAsync("deezer", "6")).ReturnsAsync(
+            mappedLocalId == null ? null : new LocalSongMapping { ExternalProvider = "deezer", ExternalId = "6", LocalSubsonicId = mappedLocalId });
+    };
+
+    private static string LibrarySongJson(string albumName) =>
+        "{\"subsonic-response\":{\"status\":\"ok\",\"song\":{\"id\":\"local-song-1\",\"album\":\"" + albumName + "\",\"albumId\":\"local-album-1\"}}}";
+
+    [Fact]
+    public async Task GetAlbum_WhenRemoteAlbumIsOwnedByNow_ServesTheLibraryAlbum()
+    {
+        var controller = CreateController(
+            RemoteKammthaarProvider(), asXml: false, albumId: "ext-deezer-album-7",
+            songJson: LibrarySongJson("Kammthaar"), configureLibrary: RemoteAlbumLibrary("local-song-1"));
+
+        var result = await controller.GetAlbum();
+
+        var jsonResult = Assert.IsType<JsonResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(jsonResult.Value));
+        var songs = doc.RootElement.GetProperty("subsonic-response").GetProperty("album").GetProperty("song").EnumerateArray().ToList();
+        Assert.Equal("local-song-1", songs[0].GetProperty("id").GetString());
+        Assert.Equal(new[] { "Kammthaar", "Kammthaar (Live)" }, songs.Select(s => s.GetProperty("title").GetString()));
+    }
+
+    [Fact]
+    public async Task GetAlbum_WhenNothingOfRemoteAlbumIsMapped_StaysRemote()
+    {
+        var controller = CreateController(
+            RemoteKammthaarProvider(), asXml: false, albumId: "ext-deezer-album-7",
+            songJson: LibrarySongJson("Kammthaar"), configureLibrary: RemoteAlbumLibrary(null));
+
+        var result = await controller.GetAlbum();
+
+        Assert.Equal(new[] { "Kammthaar", "Kammthaar (Live)" }, GetMergedSongTitles(result));
+        var jsonResult = Assert.IsType<JsonResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(jsonResult.Value));
+        Assert.StartsWith("ext-deezer-song", doc.RootElement.GetProperty("subsonic-response").GetProperty("album").GetProperty("song")[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task GetAlbum_WhenMappedTrackLivesInAnotherAlbum_StaysRemote()
+    {
+        var controller = CreateController(
+            RemoteKammthaarProvider(), asXml: false, albumId: "ext-deezer-album-7",
+            songJson: LibrarySongJson("Another Album"), configureLibrary: RemoteAlbumLibrary("local-song-1"));
+
+        var result = await controller.GetAlbum();
+
+        var jsonResult = Assert.IsType<JsonResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(jsonResult.Value));
+        Assert.StartsWith("ext-deezer-song", doc.RootElement.GetProperty("subsonic-response").GetProperty("album").GetProperty("song")[0].GetProperty("id").GetString());
     }
 }
